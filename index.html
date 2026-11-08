@@ -437,7 +437,9 @@ const D={
 'live.t.load':['Atualizando dados…','Updating data…','Actualizando datos…'],
 'live.d.load':['Buscando Selic, IPCA, dólar e cotações.','Fetching Selic, CPI, USD/BRL and quotes.','Buscando Selic, IPCA, dólar y cotizaciones.'],
 'live.t.ok':['Dados atualizados em {h}','Data updated {h}','Datos actualizados {h}'],
-'live.d.ok':['{n} de {m} ativos com preço ao vivo. Indicadores ao vivo: ações dos EUA e P/L do Brasil. O restante é de referência: confira antes de investir.','{n} of {m} assets with live price. Live indicators: US stocks and Brazil P/E. The rest are reference values: check before investing.','{n} de {m} activos con precio en vivo. Indicadores en vivo: acciones de EE. UU. y P/L de Brasil. El resto es de referencia: verifica antes de invertir.'],
+'live.d.ok':['{n} de {m} ativos com preço ao vivo. {x} Confira os dados antes de investir.','{n} of {m} assets with live price. {x} Check the data before investing.','{n} de {m} activos con precio en vivo. {x} Verifica los datos antes de invertir.'],
+'live.ind.some':['Indicadores ao vivo em {k} ativos; os demais são de referência.','Live indicators for {k} assets; the others are reference values.','Indicadores en vivo en {k} activos; los demás son de referencia.'],
+'live.ind.none':['Os indicadores (P/L, dividendos etc.) são de referência.','Indicators (P/E, dividends etc.) are reference values.','Los indicadores (P/L, dividendos etc.) son de referencia.'],
 'live.d.partial':['Falhou: {e}.','Failed: {e}.','Falló: {e}.'],
 'live.t.nokey':['Preços ao vivo desligados','Live prices are off','Precios en vivo desactivados'],
 'live.d.nokey':['Selic, IPCA e dólar se atualizam sozinhos. Para cotações de ações e FIIs, adicione suas chaves gratuitas em Ajustes. Enquanto isso, os valores de cada ativo são de referência: informe os atuais.','Selic, CPI and USD/BRL update on their own. For stock and FII quotes, add your free keys in Settings. Meanwhile each asset shows reference values: enter the current ones.','Selic, IPCA y dólar se actualizan solos. Para cotizaciones de acciones y FIIs, agrega tus claves gratuitas en Ajustes. Mientras tanto, los valores de cada activo son de referencia: ingresa los actuales.'],
@@ -1130,14 +1132,182 @@ async function pool(items,n,fn){let i=0;await Promise.all(Array.from({length:Mat
 const isoBR=x=>{const m=/^(\d{2})\/(\d{2})\/(\d{4})$/.exec(x||'');return m?`${m[3]}-${m[2]}-${m[1]}`:null};
 
 async function loadBCB(){
-  const S={selic:432,ipca:13522,usd:1,cdi:4389},res={};let ok=0,lastErr='';
-  await Promise.all(Object.entries(S).map(async([k,id])=>{
+  const S={selic:[432,0.5,60],ipca:[13522,-5,60],usd:[1,1,20],cdi:[4389,1,60]},res={};let ok=0,lastErr='';
+  await Promise.all(Object.entries(S).map(async([k,[id,lo,hi]])=>{
     try{const j=await getJSON(`https://api.bcb.gov.br/dados/serie/bcdata.sgs.${id}/dados/ultimos/1?formato=json`);
-      const row=Array.isArray(j)?j[j.length-1]:null,v=row?num(row.valor,-100,100000):undefined;
+      const row=Array.isArray(j)?j[j.length-1]:null,v=row?num(row.valor,lo,hi):undefined;
       if(v!==undefined){res[k]={v,d:isoBR(row.data)};ok++}}catch(e){lastErr=errTxt(e)}}));
   if(!ok){LIVE.st.bcb={s:'fail',e:lastErr||'sem resposta'};return}
   LIVE.macro={...LIVE.macro,...res};LIVE.st.bcb={s:'ok',n:ok};
 }
 function applyMacro(){
   const m=LIVE.macro||{};let any=false;
-  if(m.selic){MACRO.selic=m.selic.v;if(m.selic.d)MACRO.selicDate=m.s
+  if(m.selic){MACRO.selic=m.selic.v;if(m.selic.d)MACRO.selicDate=m.selic.d;any=true}
+  if(m.ipca){MACRO.ipca=m.ipca.v;if(m.ipca.d)MACRO.ipcaMonth=m.ipca.d.slice(0,7);any=true}
+  if(m.usd){MACRO.usd=m.usd.v;if(m.usd.d)MACRO.mktDate=m.usd.d;any=true}
+  if(m.ibov){MACRO.ibov=m.ibov.v;if(m.ibov.d)MACRO.ibovDate=m.ibov.d;any=true}
+  MACRO.live=any;calcMacro(m.cdi?m.cdi.v:null);
+  if(state.rfAuto){state.rf=Math.round(MACRO.cdi*100)/100;const e=document.getElementById('rf');if(e&&document.activeElement!==e)e.value=state.rf}
+}
+
+/* brapi: testa 3 formatos de chamada e guarda o que funcionar */
+const BR_VARIANTS=[
+  (s,k)=>({url:`https://brapi.dev/api/quote/${s}?fundamental=true&token=${encodeURIComponent(k)}`}),
+  (s,k)=>({url:`https://brapi.dev/api/v2/stocks/quote?symbols=${s}&token=${encodeURIComponent(k)}`}),
+  (s,k)=>({url:`https://brapi.dev/api/v2/stocks/quote?symbols=${s}`,opt:{headers:{Authorization:'Bearer '+k}}})
+];
+const brItems=j=>((j&&j.results)||[]).map(r=>{const it=r&&r.data&&typeof r.data==='object'?r.data:r;return {sym:String(r.requestedSymbol||r.symbol||it.symbol||'').toUpperCase(),it}});
+async function loadBrapi(){
+  const tk=state.tok.brapi;if(!tk){LIVE.st.brapi={s:'nokey'};return}
+  const syms=uniBR(),chunks=[];for(let i=0;i<syms.length;i+=10)chunks.push(syms.slice(i,i+10));
+  let lastErr='',got=0,stop=false;
+  const call=async(list,vi)=>{const q=BR_VARIANTS[vi](list.join(','),tk);return brItems(await getJSON(q.url,q.opt))};
+  const apply=items=>{for(const {sym,it} of items){const b=BASE.find(x=>x.t===sym);if(!b)continue;const p=num(it.regularMarketPrice,0.01,1e6);if(p===undefined)continue;
+    const rec=LIVE.q[sym]||(LIVE.q[sym]={});rec.price=p;rec.liveAt=Date.now();
+    const pl=b.c==='BR'?num(it.priceEarnings,0.1,200):undefined;if(pl!==undefined)rec.pl=pl;got++}};
+  let vi=null,first=null;
+  const order=LIVE.bv!=null?[LIVE.bv,...[0,1,2].filter(v=>v!==LIVE.bv)]:[0,1,2];
+  for(const v of order){try{const it=await call(chunks[0],v);if(it.length){vi=v;first=it;break}lastErr='sem resultados'}catch(e){lastErr=errTxt(e);if(e.status===429)break}}
+  if(vi===null){LIVE.st.brapi={s:'fail',e:lastErr||'sem resposta'};return}
+  LIVE.bv=vi;apply(first);
+  const need=first.length<chunks[0].length/2?chunks[0].filter(x=>!first.some(f=>f.sym===x)):[];
+  await pool(chunks.slice(1),2,async ch=>{if(stop)return;try{apply(await call(ch,vi))}catch(e){lastErr=errTxt(e);if(e.status===429||!e.status)stop=true;else need.push(...ch)}});
+  await pool(need,3,async x=>{if(stop)return;try{apply(await call([x],vi))}catch(e){lastErr=errTxt(e);if(e.status===429)stop=true}});
+  try{const r=(await call(['%5EBVSP'],vi))[0];const p=r?num(r.it.regularMarketPrice,1000,1e7):undefined;
+    if(p!==undefined){const tm=r.it.regularMarketTime,d=typeof tm==='number'?new Date(tm*(tm<1e12?1000:1)):new Date(tm);
+      LIVE.macro={...LIVE.macro,ibov:{v:p,d:isNaN(d)?null:d.toISOString().slice(0,10)}}}}catch(e){}
+  LIVE.st.brapi=got>0?{s:'ok',n:got}:{s:'fail',e:lastErr||'sem resultados'};
+}
+
+/* Finnhub: preço + indicadores das ações dos EUA */
+async function loadFinnhub(){
+  const tk=state.tok.finnhub;if(!tk){LIVE.st.fh={s:'nokey'};return}
+  const syms=uniUS();let got=0,lastErr='',stop=false;const K=encodeURIComponent(tk);
+  await pool(syms,3,async t0=>{
+    if(stop)return;const s=encodeURIComponent(SYM[t0]||t0),b=BASE.find(x=>x.t===t0);
+    try{
+      const q=await getJSON(`https://finnhub.io/api/v1/quote?symbol=${s}&token=${K}`);
+      const rec=LIVE.q[t0]||(LIVE.q[t0]={});
+      const p=num(q&&q.c,0.01,1e6);if(p!==undefined){rec.price=p;rec.liveAt=Date.now();got++}
+      const j=await getJSON(`https://finnhub.io/api/v1/stock/metric?symbol=${s}&metric=all&token=${K}`);
+      const m=(j&&j.metric)||{},pick=(...k)=>{for(const x of k)if(m[x]!=null)return m[x]};
+      const v={pl:num(pick('peTTM','peBasicExclExtraTTM'),0.1,300),pvp:num(pick('pbQuarterly','pbAnnual'),0.05,300),
+        dy:num(pick('dividendYieldIndicatedAnnual','currentDividendYieldTTM'),0,30),roe:num(pick('roeTTM'),-100,500),
+        mg:b&&b.s==='banks'?undefined:num(pick('netProfitMarginTTM'),-100,100),g:num(pick('epsGrowth5Y'),-50,60),b:num(pick('beta'),-1,4)};
+      for(const k in v)if(v[k]!==undefined)rec[k]=v[k];
+    }catch(e){lastErr=errTxt(e);if(!e.status||e.status===429||e.status===401||e.status===403)stop=true}
+  });
+  LIVE.st.fh=got>0?{s:'ok',n:got}:{s:'fail',e:lastErr||'sem resultados'};
+}
+
+async function refreshLive(force){
+  if(LIVE.busy)return;
+  if(!force&&LIVE.ts&&Date.now()-LIVE.ts<TTL)return;
+  LIVE.busy=true;renderLive();
+  await Promise.allSettled([loadBCB(),loadBrapi(),loadFinnhub()]);
+  if(['bcb','brapi','fh'].some(k=>LIVE.st[k].s==='ok'))LIVE.ts=Date.now();
+  LIVE.busy=false;saveLive();applyMacro();
+  const a=document.activeElement,typing=!!(a&&a.tagName==='INPUT'&&a.closest&&a.closest('#panel'));
+  renderAll(typing);
+}
+function renderLive(){
+  const el=$('#live-alert');if(!el)return;
+  const total=BASE.length,cnt=BASE.filter(x=>LIVE.q[x.t]&&LIVE.q[x.t].price).length,st=LIVE.st;
+  const errs=['bcb','brapi','fh'].filter(k=>st[k].s==='fail').map(k=>`${t('live.st.'+k)}: ${st[k].e}`);
+  const noKeys=!state.tok.brapi&&!state.tok.finnhub;
+  let c='alert',tt,dd;
+  if(LIVE.busy){tt=t('live.t.load');dd=t('live.d.load')}
+  else if(cnt>0){c='alert ok';tt=t('live.t.ok',{h:fmtStamp(LIVE.ts)});const ki=BASE.filter(x=>LIVE.q[x.t]&&Object.keys(LIVE.q[x.t]).some(k=>k!=='price'&&k!=='liveAt')).length;dd=t('live.d.ok',{n:cnt,m:total,x:ki?t('live.ind.some',{k:ki}):t('live.ind.none')})+(errs.length?' '+t('live.d.partial',{e:errs.join('; ')}):'')}
+  else if(noKeys){tt=t('live.t.nokey');dd=t('live.d.nokey')}
+  else{tt=t('live.t.err');dd=t('live.d.err',{e:errs.join('; ')||'—'})}
+  el.className=c;$('#live-t').textContent=tt;$('#live-d').textContent=dd;
+  const bt=$('#live-btn');bt.textContent=t('live.btn');bt.disabled=!!LIVE.busy;
+}
+function sheetAlert(s){
+  if(s.live&&s.live.includes('price')){
+    const f=s.live.filter(k=>k!=='price').map(k=>t('fd.'+k).replace(/ \(%\)/,'')).join(', ');
+    return `<div class="alert ok" role="note" style="margin:14px 0 0"><b>${t('sh.live.t',{h:fmtStamp(s.liveAt)})}</b><span>${f?t('sh.live.d',{f}):t('sh.live.d0')}</span></div>`;
+  }
+  return `<div class="alert" role="note" style="margin:14px 0 0"><b>${t('alert.t')}</b><span>${t('alert.sheet')}</span></div>`;
+}
+function liveSettingsHTML(){
+  const L=k=>{const x=LIVE.st[k];return x.s==='ok'?t('live.ok',{n:x.n}):x.s==='fail'?t('live.fail',{e:x.e}):x.s==='nokey'?t('live.off'):t('live.wait')};
+  return `<div class="sh-sec"><span class="lbl">${t('live.set')}</span>
+   <p class="note" style="margin-top:6px">${t('live.key.n')}</p>
+   <label class="tokf" for="tk-brapi">${t('live.key.brapi')}<input id="tk-brapi" type="password" autocomplete="off" value="${esc(state.tok.brapi)}"></label>
+   <label class="tokf" for="tk-fh">${t('live.key.fh')}<input id="tk-fh" type="password" autocomplete="off" value="${esc(state.tok.finnhub)}"></label>
+   <div class="act"><button type="button" class="btn pri" data-live="1">${t('live.test')}</button></div>
+   <div style="margin-top:12px">${['bcb','brapi','fh'].map(k=>`<div class="status-l"><span>${t('live.st.'+k)}</span><b>${L(k)}</b></div>`).join('')}</div></div>`;
+}
+
+function renderAll(skipSheet){
+  applyTheme();applyStatic();recompute();renderLive();renderMacro();renderControls();renderPortfolio();renderRank();renderStats();renderGlossary();
+  if(sheetMode&&!skipSheet)showSheet();
+}
+
+function portText(){
+  const p=PORT,amt=state.amount||0,lines=[t('copy.t1',{pf:t('pf.'+state.pf+'.n'),hz:t('hz.'+state.hz+'.n')}),t('copy.t2',{v:brl(amt)}),''];
+  p.items.forEach(x=>{const q=qty(x,x.w/100*amt);lines.push(`${x.t} · ${fmt(x.w,1)}% · ${brl(x.w/100*amt)}${q!=null?' · '+t('units',{n:q}):''}`)});
+  if(p.fixed>0.05)lines.push(`${t('fx.name')} · ${fmt(p.fixed,1)}% · ${brl(p.fixed/100*amt)}`);
+  lines.push('',t('alert.short'),t('copy.foot'));return lines.join('\n');
+}
+
+/* ===== eventos ===== */
+document.addEventListener('click',e=>{
+  const T=e.target;
+  const hz=T.closest('[data-hz]');if(hz){state.hz=hz.dataset.hz;persist();renderAll();return}
+  const pf=T.closest('[data-pf]');if(pf){state.pf=pf.dataset.pf;persist();renderAll();return}
+  const mk=T.closest('[data-mkt]');if(mk){state.mkt=mk.dataset.mkt;state.limit=10;renderControls();renderRank();return}
+  if(T.closest('#more')){state.limit+=10;renderRank();return}
+  if(T.closest('#gear')){openSettings();return}
+  if(T.closest('[data-close]')){closeSheet();return}
+  const lg=T.closest('button[data-lang]');if(lg){state.lang=lg.dataset.lang;persist();renderAll();return}
+  const th=T.closest('button[data-theme]');if(th){state.theme=th.dataset.theme;persist();renderAll();return}
+  const pa=T.closest('button[data-pal]');if(pa){state.pal=pa.dataset.pal;persist();renderAll();return}
+  if(T.closest('#live-btn')){refreshLive(true);return}
+  if(T.closest('[data-live]')){const a=$('#tk-brapi'),b=$('#tk-fh');if(a)state.tok.brapi=a.value.trim();if(b)state.tok.finnhub=b.value.trim();persist();refreshLive(true);return}
+  const fv_=T.closest('[data-fav]');if(fv_){const k=fv_.dataset.fav,i=state.fav.indexOf(k);if(i>=0)state.fav.splice(i,1);else state.fav.push(k);persist();renderRank();showSheet();return}
+  if(T.closest('[data-reset]')){delete state.over[sheetT];persist();renderAll();return}
+  if(T.closest('#copy')){
+    const txt=portText(),box=$('#copybox');
+    const fallback=()=>{box.hidden=false;box.value=txt;box.focus();box.select();toast(t('copy.fail'))};
+    try{navigator.clipboard.writeText(txt).then(()=>{box.hidden=true;toast(t('copy.ok'))},fallback)}catch(err){fallback()}
+    return;
+  }
+  const o=T.closest('[data-open]');if(o){openSheet(o.dataset.open)}
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&sheetMode)closeSheet()});
+$('#amount').addEventListener('input',e=>{state.amount=Math.max(0,parseFloat(e.target.value)||0);persist();renderPortfolio();renderStats()});
+$('#ext').addEventListener('input',e=>{state.ext=+e.target.value;persist();renderAll()});
+$('#fii').addEventListener('input',e=>{state.fii=+e.target.value;persist();renderAll()});
+$('#sort').addEventListener('change',e=>{state.sort=e.target.value;persist();state.limit=10;renderRank()});
+$('#rf').addEventListener('input',e=>{const v=parseFloat(e.target.value);state.rf=isNaN(v)?0:clamp(v,0,50);state.rfAuto=false;persist();recompute();renderPortfolio();renderStats()});
+$('#pmt').addEventListener('input',e=>{state.pmt=Math.max(0,parseFloat(e.target.value)||0);persist();renderStats()});
+$('#panel').addEventListener('change',e=>{
+  const f=e.target.dataset&&e.target.dataset.f;if(!f||!sheetT)return;
+  const v=e.target.value===''?null:parseFloat(e.target.value);
+  const must=BASE.find(x=>x.t===sheetT).c==='FI'?['pvp','dy','b']:['pl','pvp','roe','g','b','dy'];
+  if(v===null&&must.includes(f))return;
+  if(v!==null&&(isNaN(v)||(f!=='g'&&v<0)))return;
+  (state.over[sheetT]=state.over[sheetT]||{})[f]=v;persist();renderAll();
+});
+
+function route(){
+  const est=location.hash==='#estatisticas';
+  $('#view-carteira').hidden=est;$('#view-estatisticas').hidden=!est;
+  const a=$('#tab-carteira'),b=$('#tab-estatisticas');
+  if(est){b.setAttribute('aria-current','page');a.removeAttribute('aria-current')}else{a.setAttribute('aria-current','page');b.removeAttribute('aria-current')}
+  window.scrollTo(0,0);
+}
+window.addEventListener('hashchange',route);
+
+state.tok={brapi:(state.tok&&state.tok.brapi)||CONFIG.brapiToken,finnhub:(state.tok&&state.tok.finnhub)||CONFIG.finnhubToken};
+applyMacro();
+$('#amount').value=state.amount;$('#rf').value=state.rf;$('#pmt').value=state.pmt;
+renderAll();route();
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshLive(false)});
+setTimeout(()=>refreshLive(false),200);
+}
+</script>
+
+</body></html>
