@@ -1,6 +1,12 @@
 <!doctype html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0A6B73"><style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 <title>Margem Invest</title>
+<script>
+(function(){var errs=[];window.addEventListener('error',function(e){errs.push((e.message||'erro')+(e.lineno?' (linha '+e.lineno+')':''))});
+function show(){if(window.__ok)return;var d=document.createElement('div');d.setAttribute('style','position:fixed;z-index:99999;left:12px;right:12px;top:12px;background:#fff;color:#900;border:2px solid #900;border-radius:10px;padding:12px;font:14px/1.4 system-ui,sans-serif;word-break:break-word');
+d.textContent='O app não carregou. Tamanho do arquivo lido: '+document.documentElement.outerHTML.length+' caracteres. '+(errs.length?'Erro: '+errs.join(' | '):'Sem erro de script: o arquivo no GitHub parece incompleto ou alterado. Envie de novo o index.html inteiro.');document.body&&document.body.appendChild(d)}
+window.addEventListener('load',function(){setTimeout(show,300)})})();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&display=swap" rel="stylesheet">
@@ -1304,7 +1310,7 @@ window.addEventListener('hashchange',route);
 state.tok={brapi:(state.tok&&state.tok.brapi)||CONFIG.brapiToken,finnhub:(state.tok&&state.tok.finnhub)||CONFIG.finnhubToken};
 applyMacro();
 $('#amount').value=state.amount;$('#rf').value=state.rf;$('#pmt').value=state.pmt;
-renderAll();route();
+renderAll();route();window.__ok=1;
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshLive(false)});
 setTimeout(()=>refreshLive(false),200);
 }
